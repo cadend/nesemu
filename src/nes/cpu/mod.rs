@@ -1,17 +1,40 @@
+mod instruction;
 mod memory;
+
+use log;
 
 use crate::nes::cartridge::Cartridge;
 use memory::Memory;
 
-#[derive(Debug)]
 pub struct Cpu {
-    reg_a: u8,
-    reg_x: u8,
-    reg_y: u8,
+    a: u8,
+    x: u8,
+    y: u8,
     sp: u8,
     pc: u16,
     flags: u8,
     memory: Memory,
+}
+
+impl std::fmt::Debug for Cpu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "CPU \n  a: {:#04X} x: {:#04X} y: {:#04X}",
+            self.a, self.x, self.y
+        )?;
+        writeln!(f, "  sp: {:#04X} pc: {:#06X}", self.sp, self.pc)?;
+        write!(
+            f,
+            "  C: {} Z: {} I: {} D: {} V: {} N: {}",
+            self.flags & flags::CARRY > 1,
+            self.flags & flags::ZERO > 1,
+            self.flags & flags::INTERRUPT_DISABLE > 1,
+            self.flags & flags::DECIMAL > 1,
+            self.flags & flags::OVERFLOW > 1,
+            self.flags & flags::NEGATIVE > 1
+        )
+    }
 }
 
 mod flags {
@@ -26,9 +49,9 @@ mod flags {
 impl Cpu {
     pub fn new(cartridge: Cartridge) -> Self {
         let mut cpu = Cpu {
-            reg_a: 0,
-            reg_x: 0,
-            reg_y: 0,
+            a: 0,
+            x: 0,
+            y: 0,
             sp: 0xfd,
             pc: 0,
             flags: 0,
@@ -46,18 +69,22 @@ impl Cpu {
         if bit_5 {
             mask = mask | 0b00100000;
         }
-        self.flags = self.flags & mask;
+        self.flags &= mask;
     }
 
     fn reset(&mut self) {
         self.sp = 0xfd;
         self.pc = self.memory.read_u16(0xfffc);
-        self.flags = self.flags | flags::INTERRUPT_DISABLE;
+        self.flags |= flags::INTERRUPT_DISABLE;
         self.set_b_flag(true, false);
     }
 
-    pub fn step(&mut self) {
-        println!("program counter at {:#06x}", self.pc);
-        panic!();
+    pub fn step(&mut self, trace_cpu: bool) {
+        let i = instruction::get_instruction(self.memory.read_u8(self.pc));
+        //TODO: manage cycles
+        let _cycles_consumed = i.execute(self);
+        if trace_cpu {
+            log::trace!("{:#?}", self);
+        }
     }
 }

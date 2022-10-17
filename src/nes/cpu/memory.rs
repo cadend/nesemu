@@ -16,22 +16,17 @@ pub struct Memory {
     cartridge: Cartridge,
 }
 
-impl std::fmt::Debug for Memory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Memory")
-            .field("contents", &"omitted for brevity")
-            .finish()
-    }
-}
-
 impl Memory {
     pub fn new(cartridge: Cartridge) -> Self {
-        Memory {
+        let mut m = Memory {
             internal_ram: [0; 0x800],
             ppu_registers: [0; 0x8],
             apu_registers: [0; 0x18],
             cartridge,
-        }
+        };
+        //TODO: remove this hack, just gets past PPU wait loops to keep implementing instructions for now
+        m.ppu_registers[2] = 0x80;
+        m
     }
 
     pub fn read_u8(&self, addr: u16) -> u8 {
@@ -42,11 +37,26 @@ impl Memory {
             0x2000..=0x3fff => self.ppu_registers[a % 8],
             0x4000..=0x4017 => self.apu_registers[a - 0x4000],
             0x4018..=0x401f => panic!("disabled register at {:#06x} not supported", addr),
-            0x4020..=0xffff => panic!("cartridge memory read {:#06x} not supported", addr),
+            0x4020..=0xffff => self.cartridge.read_u8(addr),
+        }
+    }
+
+    pub fn write_u8(&mut self, addr: u16, val: u8) {
+        let a = addr as usize;
+
+        match addr {
+            0x0000..=0x1fff => self.internal_ram[a % 0x0800] = val,
+            0x2000..=0x3fff => self.ppu_registers[a % 8] = val,
+            0x4000..=0x4017 => self.apu_registers[a - 0x4000] = val,
+            0x4018..=0x401f => panic!("disabled register at {:#06x} not supported", addr),
+            0x4020..=0xffff => unimplemented!("writes to cartridge address space not supported"),
         }
     }
 
     pub fn read_u16(&self, addr: u16) -> u16 {
-        (self.read_u8(addr) as u16) & ((self.read_u8(addr + 1) as u16) << 8)
+        let lo = self.read_u8(addr) as u16;
+        let hi = (self.read_u8(addr + 1) as u16) << 8;
+
+        lo | hi
     }
 }

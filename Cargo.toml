@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.0.14", features = ["derive"] }
+log = "0.4.17"
+simple_logger = "2.3.0"

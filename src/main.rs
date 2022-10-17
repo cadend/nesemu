@@ -1,7 +1,8 @@
-mod err;
 mod nes;
 
 use clap::Parser;
+use log;
+use simple_logger;
 
 use nes::Nes;
 
@@ -10,11 +11,24 @@ use nes::Nes;
 struct Args {
     #[arg(long)]
     rom: String,
+
+    #[arg(short, long)]
+    trace: bool,
+
+    #[arg(long)]
+    trace_cpu: bool,
 }
 
 fn main() {
     let args = Args::parse();
 
+    let log_level = if args.trace {
+        log::Level::Trace
+    } else {
+        log::Level::Warn
+    };
+    simple_logger::init_with_level(log_level).unwrap();
+
     let mut console = Nes::new(args.rom).expect("unable to create console");
-    console.run();
+    console.run(args.trace_cpu);
 }

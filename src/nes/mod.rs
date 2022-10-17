@@ -16,9 +16,9 @@ impl Nes {
         })
     }
 
-    pub fn run(&mut self) {
+    pub fn run(&mut self, trace_cpu: bool) {
         loop {
-            self.cpu.step();
+            self.cpu.step(trace_cpu);
         }
     }
 }
