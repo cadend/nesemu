@@ -1,9 +1,9 @@
 mod err;
-mod rom;
+mod nes;
 
 use clap::Parser;
 
-use rom::Rom;
+use nes::Nes;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -15,8 +15,6 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    match Rom::new(&args.rom) {
-        Ok(_) => println!("loaded rom"),
-        Err(e) => println!("error loading rom: {:?}", e),
-    }
+    let mut console = Nes::new(args.rom).expect("unable to create console");
+    console.run();
 }

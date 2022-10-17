@@ -1,8 +1,6 @@
 use std::fs::File;
 use std::io::Read;
 
-use crate::err::IoError;
-
 #[derive(Debug)]
 enum NametableMirroring {
     Vertical,
@@ -35,8 +33,9 @@ struct Header {
     prg_ram_size: u8,
 }
 
-pub struct Rom {
+pub struct Cartridge {
     header: Header,
+    trainer: Option<[u8; 512]>,
     prg_rom: Vec<u8>,
     chr_rom: Vec<u8>,
 }
@@ -65,14 +64,22 @@ impl Header {
     }
 }
 
-impl Rom {
-    pub fn new(filename: &String) -> Result<Self, IoError> {
+impl Cartridge {
+    pub fn new(filename: &String) -> std::io::Result<Self> {
         let mut file = File::open(filename)?;
 
         let mut header_data = vec![0u8; 16];
         file.read_exact(&mut header_data)?;
         let header = Header::parse_header(&header_data);
-        println!("loading rom with header {:#?}", header);
+        println!("loading cartridge with header {:#?}", header);
+
+        let trainer = if header.trainer_present {
+            let mut t = [0u8; 512];
+            file.read_exact(&mut t)?;
+            Some(t)
+        } else {
+            None
+        };
 
         let mut prg_rom = vec![0u8; 16384 * header.prg_rom_size as usize];
         file.read_exact(&mut prg_rom)?;
@@ -80,8 +87,9 @@ impl Rom {
         let mut chr_rom = vec![0u8; 8192 * header.chr_rom_size as usize];
         file.read_exact(&mut chr_rom)?;
 
-        Ok(Rom {
+        Ok(Cartridge {
             header,
+            trainer,
             prg_rom,
             chr_rom,
         })
