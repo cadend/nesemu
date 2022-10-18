@@ -16,7 +16,10 @@ impl Nes {
         })
     }
 
-    pub fn run(&mut self, trace_cpu: bool) {
+    pub fn run(&mut self, trace_cpu: bool, breakpoint: Option<u16>) {
+        if breakpoint.is_some() {
+            self.cpu.set_breakpoint(breakpoint.unwrap());
+        }
         loop {
             self.cpu.step(trace_cpu);
         }

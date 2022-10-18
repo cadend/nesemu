@@ -14,6 +14,7 @@ pub struct Cpu {
     pc: u16,
     flags: u8,
     memory: Memory,
+    breakpoint: u16,
 }
 
 impl std::fmt::Debug for Cpu {
@@ -56,9 +57,14 @@ impl Cpu {
             pc: 0,
             flags: 0,
             memory: Memory::new(cartridge),
+            breakpoint: 0,
         };
         cpu.reset();
         cpu
+    }
+
+    pub fn set_breakpoint(&mut self, b: u16) {
+        self.breakpoint = b;
     }
 
     fn set_b_flag(&mut self, bit_5: bool, bit_4: bool) {
@@ -80,11 +86,22 @@ impl Cpu {
     }
 
     pub fn step(&mut self, trace_cpu: bool) {
+        let breakpoint = self.pc == self.breakpoint;
+
         let i = instruction::get_instruction(self.memory.read_u8(self.pc));
         //TODO: manage cycles
         let _cycles_consumed = i.execute(self);
         if trace_cpu {
             log::trace!("{:#?}", self);
+        }
+        if breakpoint {
+            println!(
+                "breaking after instruction at specified breakpoint: {:#06X}",
+                self.breakpoint
+            );
+            println!("instruction: {:?}", i);
+            println!("{:?}", self);
+            panic!();
         }
     }
 }

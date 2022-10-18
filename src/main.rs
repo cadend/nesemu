@@ -1,6 +1,7 @@
 mod nes;
 
 use clap::Parser;
+use clap_num::maybe_hex;
 use log;
 use simple_logger;
 
@@ -17,6 +18,9 @@ struct Args {
 
     #[arg(long)]
     trace_cpu: bool,
+
+    #[arg(short, long, value_parser=maybe_hex::<u16>)]
+    breakpoint: Option<u16>,
 }
 
 fn main() {
@@ -30,5 +34,5 @@ fn main() {
     simple_logger::init_with_level(log_level).unwrap();
 
     let mut console = Nes::new(args.rom).expect("unable to create console");
-    console.run(args.trace_cpu);
+    console.run(args.trace_cpu, args.breakpoint);
 }
