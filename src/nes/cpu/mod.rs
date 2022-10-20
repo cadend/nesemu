@@ -4,8 +4,6 @@ mod memory;
 use log;
 use log::trace;
 
-use std::cell::RefCell;
-
 use crate::nes::cartridge::Cartridge;
 use memory::Memory;
 
@@ -40,7 +38,7 @@ pub struct Cpu {
     flags: u8,
     memory: Memory,
     breakpoint: u16,
-    current_instruction: RefCell<instruction::InstructionInfo>,
+    current_instruction: instruction::InstructionInfo,
 }
 
 impl std::fmt::Debug for Cpu {
@@ -84,7 +82,7 @@ impl Cpu {
             flags: 0,
             memory: Memory::new(cartridge),
             breakpoint: 0,
-            current_instruction: RefCell::new(instruction::InstructionInfo::default()),
+            current_instruction: instruction::InstructionInfo::default(),
         };
         cpu.reset();
         cpu
@@ -148,14 +146,14 @@ impl Cpu {
     pub fn tick(&mut self, trace_cpu: bool) {
         let breakpoint = self.pc == self.breakpoint;
 
-        if self.current_instruction.borrow().cycles_remaining == 0 {
+        if self.current_instruction.cycles_remaining == 0 {
             let i = instruction::get_instruction(self);
-            let _ = self.current_instruction.replace(i);
+            self.current_instruction = i;
             self.pc += 1;
         }
 
-        self.current_instruction.borrow_mut().cycles_remaining -= 1;
-        if self.current_instruction.borrow().cycles_remaining == 0 {
+        self.current_instruction.cycles_remaining -= 1;
+        if self.current_instruction.cycles_remaining == 0 {
             self.execute_instruction();
         }
 
@@ -167,7 +165,7 @@ impl Cpu {
                 "breaking after instruction at specified breakpoint: {:#06X}",
                 self.breakpoint
             );
-            println!("instruction: {:?}", self.current_instruction.borrow());
+            println!("instruction: {:?}", self.current_instruction);
             println!("{:?}", self);
             println!("stack: {:#X?}", self.memory.get_stack_slice(self.sp));
             panic!();
@@ -217,12 +215,9 @@ impl Cpu {
         use instruction::BranchType::*;
         use instruction::Instruction::*;
 
-        let (inst, instruction_address) = {
-            let i = self.current_instruction.borrow();
-            (i.inst, i.address)
-        };
+        let instruction_address = self.current_instruction.address;
 
-        match inst {
+        match self.current_instruction.inst {
             SetInterruptDisable => {
                 trace!("pc={:#06X} SEI", instruction_address);
                 self.flags |= flags::INTERRUPT_DISABLE;
