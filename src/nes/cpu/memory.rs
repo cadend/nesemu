@@ -59,4 +59,8 @@ impl Memory {
 
         lo | hi
     }
+
+    pub fn get_stack_slice(&self, sp: u8) -> &[u8] {
+        &self.internal_ram[((0x100 + sp as u16) as usize)..=0x1FF]
+    }
 }
