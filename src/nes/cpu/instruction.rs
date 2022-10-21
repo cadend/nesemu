@@ -1,10 +1,12 @@
 use super::{Cpu, Register};
 
-#[derive(Debug, Copy, Clone)]
+use log;
+
 pub(super) struct InstructionInfo {
     pub inst: Instruction,
     pub cycles_remaining: usize,
     pub address: u16,
+    disassembly: Option<Disassembly>,
 }
 
 impl Default for InstructionInfo {
@@ -13,7 +15,191 @@ impl Default for InstructionInfo {
             inst: Instruction::Initial,
             cycles_remaining: 0,
             address: 0,
+            disassembly: None,
         }
+    }
+}
+
+impl std::fmt::Debug for InstructionInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "InstructionInfo: {{ inst: {:?}, cycles_remaining: {}, address: {:#06X}, disassembly: {:?} }}",
+               self.inst,
+               self.cycles_remaining,
+               self.address,
+               self.disassembly)
+    }
+}
+
+impl InstructionInfo {
+    pub fn disasm(&self) {
+        if let Some(d) = &self.disassembly {
+            log::trace!("pc={:#06X} {:?}", self.address, d);
+        } else {
+            log::trace!("disassembly disabled");
+        }
+    }
+}
+
+pub(super) struct Disassembly {
+    target_value: Option<u8>,
+    target_addr: Option<u16>,
+    asm: &'static str,
+}
+
+impl Disassembly {
+    fn new(i: &Instruction, cpu: &Cpu) -> Self {
+        use Instruction::*;
+        use Register::*;
+
+        let (target_value, target_addr, asm) = match *i {
+            Initial => unreachable!(),
+            SetInterruptDisable => (None, None, "SEI"),
+            SetCarry => (None, None, "SEC"),
+            SetDecimal => (None, None, "SED"),
+            ClearInterruptDisable => (None, None, "CLI"),
+            ClearDecimal => (None, None, "CLD"),
+            ClearCarry => (None, None, "CLC"),
+            ClearOverflow => (None, None, "CLV"),
+            LoadAccumulator(am) => Self::get_disam_tuple(&am, cpu, "LDA"),
+            StoreAccumulator(am) => (Some(cpu.a), Some(am.get_target_addr(cpu)), "STA"),
+            PushAccumulator => (None, None, "PHA"),
+            PopAccumulator => (None, None, "PLA"),
+            PushStatus => (None, None, "PHP"),
+            PopStatus => (None, None, "PLP"),
+            LoadX(am) => Self::get_disam_tuple(&am, cpu, "LDX"),
+            StoreX(am) => (Some(cpu.x), Some(am.get_target_addr(cpu)), "STX"),
+            RegisterTransfer(src, dst) => {
+                let s = match src {
+                    Accumulator => match dst {
+                        X => "TAX",
+                        Y => "TAY",
+                        _ => unreachable!(),
+                    },
+                    Stack => {
+                        if matches!(dst, X) {
+                            "TSX"
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                    X => match dst {
+                        Accumulator => "TXA",
+                        Stack => "TXS",
+                        _ => unreachable!(),
+                    },
+                    Y => {
+                        if matches!(dst, Accumulator) {
+                            "TYA"
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                };
+
+                (Some(cpu.get_register(src)), None, s)
+            }
+            LoadY(am) => Self::get_disam_tuple(&am, cpu, "LDY"),
+            StoreY(am) => (Some(cpu.y), Some(am.get_target_addr(cpu)), "STY"),
+            DecrementX => (None, None, "DEX"),
+            DecrementY => (None, None, "DEY"),
+            DecrementMemory(am) => (None, Some(am.get_target_addr(cpu)), "DEC"),
+            IncrementX => (None, None, "INX"),
+            IncrementY => (None, None, "INY"),
+            IncrementMemory(am) => (None, Some(am.get_target_addr(cpu)), "INC"),
+            And(am) => Self::get_disam_tuple(&am, cpu, "AND"),
+            Branch(btype) => unreachable!(),
+            JumpSavingReturn => (None, Some(cpu.memory.read_u16(cpu.pc + 1)), "JSR"),
+            ReturnFromSubroutine => (None, None, "RTS"),
+            Jump(am) => (None, Some(am.get_target_addr(cpu)), "JMP"),
+            CompareWithAccumulator(am) => Self::get_disam_tuple(&am, cpu, "CMP"),
+            CompareWithX(am) => Self::get_disam_tuple(&am, cpu, "CPX"),
+            CompareWithY(am) => Self::get_disam_tuple(&am, cpu, "CPY"),
+            ShiftAccumulatorRight => (None, None, "LSR A"),
+            ShiftAccumulatorLeft => (None, None, "ASL A"),
+            ShiftRight(am) => (None, Some(am.get_target_addr(cpu)), "LSR"),
+            ShiftLeft(am) => (None, Some(am.get_target_addr(cpu)), "ASL"),
+            AddToAccumulatorWithCarry(am) => Self::get_disam_tuple(&am, cpu, "ADC"),
+            SubtractFromAccumulatorWithBorrow(am) => Self::get_disam_tuple(&am, cpu, "SBC"),
+            Or(am) => Self::get_disam_tuple(&am, cpu, "ORA"),
+            ExclusiveOr(am) => Self::get_disam_tuple(&am, cpu, "EOR"),
+            RotateAccumulatorRight => (None, None, "ROR A"),
+            RotateRight(am) => (None, Some(am.get_target_addr(cpu)), "ROR"),
+            RotateAccumulatorLeft => (None, None, "ROL A"),
+            RotateLeft(am) => (None, Some(am.get_target_addr(cpu)), "ROL"),
+            TestBits(am) => (None, Some(am.get_target_addr(cpu)), "BIT"),
+            ForceBreak => (None, None, "BRK"),
+            ReturnFromInterrupt => (None, None, "RTI"),
+            NoOp => (None, None, "NOP"),
+            _ => unimplemented!("attempted to disassemble unrecognized instruction: {:?}", i),
+        };
+
+        Disassembly {
+            target_value,
+            target_addr,
+            asm,
+        }
+    }
+
+    fn from_branch_type(btype: &BranchType, cpu: &Cpu) -> Self {
+        use BranchType::*;
+        // add 1 to PC to advance past opcode byte
+        let val = cpu.memory.read_u8(cpu.pc + 1) as i8;
+
+        let target_addr = if val < 0 {
+            cpu.pc + 2 - (val.abs() as u16)
+        } else {
+            cpu.pc + 2 + (val as u16)
+        };
+
+        let opcode = match btype {
+            ResultZero => "BEQ",
+            ResultNotZero => "BNE",
+            ResultPlus => "BPL",
+            ResultMinus => "BMI",
+            CarryClear => "BCC",
+            CarrySet => "BCS",
+            OverflowClear => "BVC",
+            OverflowSet => "BVS",
+        };
+
+        Disassembly {
+            target_value: None,
+            target_addr: Some(target_addr),
+            asm: opcode,
+        }
+    }
+
+    fn get_disam_tuple(
+        am: &AddressingMode,
+        cpu: &Cpu,
+        opcode: &'static str,
+    ) -> (Option<u8>, Option<u16>, &'static str) {
+        use AddressingMode::*;
+
+        match *am {
+            Immediate => (Some(am.get_value(cpu)), None, opcode),
+            _ => (
+                Some(am.get_value(cpu)),
+                Some(am.get_target_addr(cpu)),
+                opcode,
+            ),
+        }
+    }
+}
+
+impl std::fmt::Debug for Disassembly {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.asm)?;
+        if let Some(a) = &self.target_addr {
+            write!(f, " (a={:#06X})", a)?;
+        };
+        if let Some(v) = &self.target_value {
+            write!(f, " [v={:#04X}]", v)?;
+        };
+        if self.target_addr.is_none() && self.target_value.is_some() {
+            write!(f, " {{imm}}")?
+        }
+        Ok(())
     }
 }
 
@@ -21,12 +207,18 @@ impl Default for InstructionInfo {
 pub(super) enum Instruction {
     Initial,
     SetInterruptDisable,
-    ClearDecimal,
+    SetCarry,
+    SetDecimal,
+    ClearInterruptDisable,
     ClearCarry,
+    ClearDecimal,
+    ClearOverflow,
     LoadAccumulator(AddressingMode),
     StoreAccumulator(AddressingMode),
     PushAccumulator,
     PopAccumulator,
+    PushStatus,
+    PopStatus,
     LoadX(AddressingMode),
     StoreX(AddressingMode),
     // src, dest
@@ -35,10 +227,10 @@ pub(super) enum Instruction {
     StoreY(AddressingMode),
     DecrementX,
     DecrementY,
+    DecrementMemory(AddressingMode),
     IncrementX,
     IncrementY,
     IncrementMemory(AddressingMode),
-    DecrementMemory(AddressingMode),
     And(AddressingMode),
     Branch(BranchType),
     JumpSavingReturn,
@@ -52,10 +244,16 @@ pub(super) enum Instruction {
     ShiftRight(AddressingMode),
     ShiftLeft(AddressingMode),
     AddToAccumulatorWithCarry(AddressingMode),
+    SubtractFromAccumulatorWithBorrow(AddressingMode),
+    Or(AddressingMode),
     ExclusiveOr(AddressingMode),
     RotateAccumulatorRight,
     RotateRight(AddressingMode),
+    RotateAccumulatorLeft,
+    RotateLeft(AddressingMode),
     TestBits(AddressingMode),
+    ForceBreak,
+    ReturnFromInterrupt,
     NoOp,
 }
 
@@ -67,6 +265,8 @@ pub(super) enum BranchType {
     ResultMinus,
     CarryClear,
     CarrySet,
+    OverflowClear,
+    OverflowSet,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -84,126 +284,190 @@ pub(super) enum AddressingMode {
 }
 
 impl AddressingMode {
+    fn get_target_addr(&self, cpu: &Cpu) -> u16 {
+        use AddressingMode::*;
+
+        // increment by one to lookahead past the opcode byte
+        let pc = cpu.pc + 1;
+
+        match *self {
+            ZeroPage => {
+                let target_addr = cpu.memory.read_u8(pc) as u16;
+                target_addr
+            }
+            IndexedZeroPageX => {
+                let target_addr = cpu.memory.read_u8(pc).wrapping_add(cpu.x) as u16;
+                target_addr
+            }
+            IndexedZeroPageY => {
+                let target_addr = cpu.memory.read_u8(pc).wrapping_add(cpu.y) as u16;
+                target_addr
+            }
+            Absolute => {
+                let target_addr = cpu.memory.read_u16(pc);
+                target_addr
+            }
+            IndexedAbsoluteX => {
+                let target_addr = cpu.memory.read_u16(pc).wrapping_add(cpu.x as u16);
+                target_addr
+            }
+            IndexedAbsoluteY => {
+                let target_addr = cpu.memory.read_u16(pc).wrapping_add(cpu.y as u16);
+                target_addr
+            }
+            Indirect => {
+                let indirect_addr = cpu.memory.read_u16(pc);
+                cpu.memory.read_u16(indirect_addr)
+            }
+            IndexedIndirect => {
+                let indirect_addr = cpu.memory.read_u8(pc).wrapping_add(cpu.x) as u16;
+                cpu.memory.read_u16(indirect_addr)
+            }
+            IndirectIndexed => {
+                let indirect_base = cpu.memory.read_u8(pc) as u16;
+                cpu.memory
+                    .read_u16(indirect_base)
+                    .wrapping_add(cpu.y as u16)
+            }
+            Immediate => unreachable!(),
+        }
+    }
+
     /// Returns the target address for the operation based on mode. Mutates the passed CPU to update the
     /// program counter for consumed operands.
     pub(super) fn get_target_addr_and_adjust_pc(&self, cpu: &mut Cpu) -> u16 {
         use AddressingMode::*;
 
+        let target_addr = self.get_target_addr(cpu);
+
         match *self {
             ZeroPage => {
-                let target_addr = cpu.memory.read_u8(cpu.pc) as u16;
-                cpu.pc += 1;
-                target_addr
+                cpu.pc += 2;
             }
             IndexedZeroPageX => {
-                let target_addr = cpu.memory.read_u8(cpu.pc).wrapping_add(cpu.x) as u16;
-                cpu.pc += 1;
-                target_addr
+                cpu.pc += 2;
             }
             IndexedZeroPageY => {
-                let target_addr = cpu.memory.read_u8(cpu.pc).wrapping_add(cpu.y) as u16;
-                cpu.pc += 1;
-                target_addr
+                cpu.pc += 2;
             }
             Absolute => {
-                let target_addr = cpu.memory.read_u16(cpu.pc);
-                cpu.pc += 2;
-                target_addr
+                cpu.pc += 3;
             }
             IndexedAbsoluteX => {
-                let target_addr = cpu.memory.read_u16(cpu.pc).wrapping_add(cpu.x as u16);
-                cpu.pc += 2;
-                target_addr
+                cpu.pc += 3;
             }
             IndexedAbsoluteY => {
-                let target_addr = cpu.memory.read_u16(cpu.pc).wrapping_add(cpu.y as u16);
-                cpu.pc += 2;
-                target_addr
+                cpu.pc += 3;
             }
             Indirect => {
-                let indirect_addr = cpu.memory.read_u16(cpu.pc);
-                cpu.pc += 2;
-                cpu.memory.read_u16(indirect_addr)
+                cpu.pc += 3;
             }
             IndexedIndirect => {
-                let indirect_addr = cpu.memory.read_u8(cpu.pc).wrapping_add(cpu.x) as u16;
-                cpu.pc += 1;
-                cpu.memory.read_u16(indirect_addr)
+                cpu.pc += 2;
             }
             IndirectIndexed => {
-                let indirect_base = cpu.memory.read_u8(cpu.pc) as u16;
-                cpu.pc += 1;
-                cpu.memory
-                    .read_u16(indirect_base)
-                    .wrapping_add(cpu.y as u16)
+                cpu.pc += 2;
             }
-            Immediate => unimplemented!(),
+            Immediate => unreachable!(),
         }
+
+        target_addr
     }
 
-    /// Returns the value for the operation based on mode. Mutates the passed CPU to update the
-    /// program counter for consumed operands.
-    pub(super) fn get_value_and_adjust_pc(&self, cpu: &mut Cpu) -> u8 {
+    fn get_value(&self, cpu: &Cpu) -> u8 {
         use AddressingMode::*;
+
+        // increment by one to lookahead past the opcode byte
+        let pc = cpu.pc + 1;
 
         match *self {
             ZeroPage => {
-                let target_addr = cpu.memory.read_u8(cpu.pc) as u16;
-                cpu.pc += 1;
+                let target_addr = cpu.memory.read_u8(pc) as u16;
                 cpu.memory.read_u8(target_addr)
             }
             IndexedZeroPageX => {
-                let target_addr = cpu.memory.read_u8(cpu.pc).wrapping_add(cpu.x) as u16;
-                cpu.pc += 1;
+                let target_addr = cpu.memory.read_u8(pc).wrapping_add(cpu.x) as u16;
                 cpu.memory.read_u8(target_addr)
             }
             IndexedZeroPageY => {
-                let target_addr = cpu.memory.read_u8(cpu.pc).wrapping_add(cpu.y) as u16;
-                cpu.pc += 1;
+                let target_addr = cpu.memory.read_u8(pc).wrapping_add(cpu.y) as u16;
                 cpu.memory.read_u8(target_addr)
             }
             Absolute => {
-                let target_addr = cpu.memory.read_u16(cpu.pc);
-                cpu.pc += 2;
+                let target_addr = cpu.memory.read_u16(pc);
                 cpu.memory.read_u8(target_addr)
             }
             IndexedAbsoluteX => {
-                let target_addr = cpu.memory.read_u16(cpu.pc).wrapping_add(cpu.x as u16);
-                cpu.pc += 2;
+                let target_addr = cpu.memory.read_u16(pc).wrapping_add(cpu.x as u16);
                 cpu.memory.read_u8(target_addr)
             }
             IndexedAbsoluteY => {
-                let target_addr = cpu.memory.read_u16(cpu.pc).wrapping_add(cpu.y as u16);
-                cpu.pc += 2;
+                let target_addr = cpu.memory.read_u16(pc).wrapping_add(cpu.y as u16);
                 cpu.memory.read_u8(target_addr)
             }
             Indirect => {
-                let indirect_addr = cpu.memory.read_u16(cpu.pc);
-                cpu.pc += 2;
+                let indirect_addr = cpu.memory.read_u16(pc);
                 let target_addr = cpu.memory.read_u16(indirect_addr);
                 cpu.memory.read_u8(target_addr)
             }
             IndexedIndirect => {
-                let indirect_addr = cpu.memory.read_u8(cpu.pc).wrapping_add(cpu.x) as u16;
-                cpu.pc += 1;
+                let indirect_addr = cpu.memory.read_u8(pc).wrapping_add(cpu.x) as u16;
                 let target_addr = cpu.memory.read_u16(indirect_addr);
                 cpu.memory.read_u8(target_addr)
             }
             IndirectIndexed => {
-                let indirect_base = cpu.memory.read_u8(cpu.pc) as u16;
-                cpu.pc += 1;
+                let indirect_base = cpu.memory.read_u8(pc) as u16;
                 let target_addr = cpu
                     .memory
                     .read_u16(indirect_base)
                     .wrapping_add(cpu.y as u16);
                 cpu.memory.read_u8(target_addr)
             }
+            Immediate => cpu.memory.read_u8(pc),
+        }
+    }
+
+    /// Returns the value for the operation based on mode. Mutates the passed CPU to update the
+    /// program counter for consumed opcode and operands.
+    pub(super) fn get_value_and_adjust_pc(&self, cpu: &mut Cpu) -> u8 {
+        use AddressingMode::*;
+
+        let value = self.get_value(cpu);
+
+        match *self {
+            ZeroPage => {
+                cpu.pc += 2;
+            }
+            IndexedZeroPageX => {
+                cpu.pc += 2;
+            }
+            IndexedZeroPageY => {
+                cpu.pc += 2;
+            }
+            Absolute => {
+                cpu.pc += 3;
+            }
+            IndexedAbsoluteX => {
+                cpu.pc += 3;
+            }
+            IndexedAbsoluteY => {
+                cpu.pc += 3;
+            }
+            Indirect => {
+                cpu.pc += 3;
+            }
+            IndexedIndirect => {
+                cpu.pc += 2;
+            }
+            IndirectIndexed => {
+                cpu.pc += 2;
+            }
             Immediate => {
-                let v = cpu.memory.read_u8(cpu.pc);
-                cpu.pc += 1;
-                v
+                cpu.pc += 2;
             }
         }
+
+        value
     }
 }
 
@@ -217,25 +481,43 @@ pub(super) fn get_instruction(cpu: &Cpu) -> InstructionInfo {
 
     //TODO: handle cycle differences depending on which page the jump targets - will probably need to do some lookahead here and store details in the info struct
     let (inst, cycles) = match opcode {
+        0x00 => (ForceBreak, 7),
+        0x01 => (Or(IndexedIndirect), 6),
+        0x05 => (Or(ZeroPage), 3),
         0x06 => (ShiftLeft(ZeroPage), 5),
+        0x08 => (PushStatus, 3),
+        0x09 => (Or(Immediate), 2),
         0x0a => (ShiftAccumulatorLeft, 2),
+        0x0d => (Or(Absolute), 4),
         0x0e => (ShiftLeft(Absolute), 6),
         0x10 => (Branch(ResultPlus), 2),
+        0x11 => (Or(IndirectIndexed), 5),
+        0x15 => (Or(IndexedZeroPageX), 4),
         0x16 => (ShiftLeft(IndexedZeroPageX), 6),
         0x18 => (ClearCarry, 2),
+        0x19 => (Or(IndexedAbsoluteY), 4),
+        0x1d => (Or(IndexedAbsoluteX), 4),
         0x1e => (ShiftLeft(IndexedAbsoluteX), 7),
         0x20 => (JumpSavingReturn, 6),
         0x21 => (And(IndexedIndirect), 6),
         0x24 => (TestBits(ZeroPage), 3),
         0x25 => (And(ZeroPage), 3),
+        0x26 => (RotateLeft(ZeroPage), 5),
+        0x28 => (PopStatus, 4),
         0x29 => (And(Immediate), 2),
+        0x2a => (RotateAccumulatorLeft, 2),
         0x2c => (TestBits(Absolute), 4),
         0x2d => (And(Absolute), 4),
+        0x2e => (RotateLeft(Absolute), 6),
         0x30 => (Branch(ResultMinus), 2),
         0x31 => (And(IndirectIndexed), 5),
         0x35 => (And(IndexedZeroPageX), 4),
+        0x36 => (RotateLeft(IndexedZeroPageX), 6),
+        0x38 => (SetCarry, 2),
         0x39 => (And(IndexedAbsoluteY), 4),
         0x3d => (And(IndexedAbsoluteX), 4),
+        0x3e => (RotateLeft(IndexedAbsoluteX), 7),
+        0x40 => (ReturnFromInterrupt, 6),
         0x41 => (ExclusiveOr(IndexedIndirect), 6),
         0x45 => (ExclusiveOr(ZeroPage), 3),
         0x46 => (ShiftRight(ZeroPage), 5),
@@ -245,9 +527,11 @@ pub(super) fn get_instruction(cpu: &Cpu) -> InstructionInfo {
         0x4c => (Jump(Absolute), 3),
         0x4d => (ExclusiveOr(Absolute), 4),
         0x4e => (ShiftRight(Absolute), 6),
+        0x50 => (Branch(OverflowClear), 2),
         0x51 => (ExclusiveOr(IndirectIndexed), 5),
         0x55 => (ExclusiveOr(IndexedZeroPageX), 4),
         0x56 => (ShiftRight(IndexedZeroPageX), 6),
+        0x58 => (ClearInterruptDisable, 2),
         0x59 => (ExclusiveOr(IndexedAbsoluteY), 4),
         0x5d => (ExclusiveOr(IndexedAbsoluteX), 4),
         0x5e => (ShiftRight(IndexedAbsoluteX), 7),
@@ -258,8 +542,10 @@ pub(super) fn get_instruction(cpu: &Cpu) -> InstructionInfo {
         0x68 => (PopAccumulator, 4),
         0x69 => (AddToAccumulatorWithCarry(Immediate), 2),
         0x6a => (RotateAccumulatorRight, 2),
+        0x6c => (Jump(Indirect), 5),
         0x6d => (AddToAccumulatorWithCarry(Absolute), 4),
         0x6e => (RotateRight(Absolute), 6),
+        0x70 => (Branch(OverflowSet), 2),
         0x71 => (AddToAccumulatorWithCarry(IndirectIndexed), 5),
         0x75 => (AddToAccumulatorWithCarry(IndexedZeroPageX), 4),
         0x76 => (RotateRight(IndexedZeroPageX), 6),
@@ -288,18 +574,24 @@ pub(super) fn get_instruction(cpu: &Cpu) -> InstructionInfo {
         0xa0 => (LoadY(Immediate), 2),
         0xa1 => (LoadAccumulator(IndexedIndirect), 6),
         0xa2 => (LoadX(Immediate), 2),
+        0xa4 => (LoadY(ZeroPage), 3),
         0xa5 => (LoadAccumulator(ZeroPage), 3),
         0xa6 => (LoadX(ZeroPage), 3),
         0xa8 => (RegisterTransfer(Accumulator, Y), 2),
         0xaa => (RegisterTransfer(Accumulator, X), 2),
+        0xac => (LoadY(Absolute), 4),
         0xad => (LoadAccumulator(Absolute), 4),
         0xae => (LoadX(Absolute), 4),
         0xa9 => (LoadAccumulator(Immediate), 2),
         0xb0 => (Branch(CarrySet), 2),
         0xb1 => (LoadAccumulator(IndirectIndexed), 5),
+        0xb4 => (LoadX(IndexedZeroPageX), 4),
         0xb5 => (LoadAccumulator(IndexedZeroPageX), 4),
         0xb6 => (LoadX(IndexedZeroPageY), 4),
+        0xb8 => (ClearOverflow, 2),
         0xb9 => (LoadAccumulator(IndexedAbsoluteY), 4),
+        0xba => (RegisterTransfer(Stack, X), 2),
+        0xbc => (LoadY(IndexedAbsoluteX), 4),
         0xbd => (LoadAccumulator(IndexedAbsoluteX), 4),
         0xbe => (LoadX(IndexedAbsoluteY), 4),
         0xc0 => (CompareWithY(Immediate), 2),
@@ -312,28 +604,49 @@ pub(super) fn get_instruction(cpu: &Cpu) -> InstructionInfo {
         0xca => (DecrementX, 2),
         0xcc => (CompareWithY(Absolute), 4),
         0xcd => (CompareWithAccumulator(Absolute), 4),
+        0xce => (DecrementMemory(Absolute), 6),
         0xd0 => (Branch(ResultNotZero), 2),
         0xd1 => (CompareWithAccumulator(IndirectIndexed), 5),
         0xd5 => (CompareWithAccumulator(IndexedZeroPageX), 4),
+        0xd6 => (DecrementMemory(IndexedZeroPageX), 6),
         0xd8 => (ClearDecimal, 2),
         0xd9 => (CompareWithAccumulator(IndexedAbsoluteY), 4),
         0xdd => (CompareWithAccumulator(IndexedAbsoluteX), 4),
+        0xde => (DecrementMemory(IndexedAbsoluteX), 7),
         0xe0 => (CompareWithX(Immediate), 2),
+        0xe1 => (SubtractFromAccumulatorWithBorrow(IndexedIndirect), 6),
         0xe4 => (CompareWithX(ZeroPage), 3),
+        0xe5 => (SubtractFromAccumulatorWithBorrow(ZeroPage), 3),
         0xe6 => (IncrementMemory(ZeroPage), 5),
         0xe8 => (IncrementX, 2),
+        0xe9 => (SubtractFromAccumulatorWithBorrow(Immediate), 2),
         0xea => (NoOp, 2),
         0xec => (CompareWithX(Absolute), 4),
+        0xed => (SubtractFromAccumulatorWithBorrow(Absolute), 4),
         0xee => (IncrementMemory(Absolute), 6),
         0xf0 => (Branch(ResultZero), 2),
+        0xf1 => (SubtractFromAccumulatorWithBorrow(IndirectIndexed), 5),
+        0xf5 => (SubtractFromAccumulatorWithBorrow(IndexedZeroPageX), 4),
         0xf6 => (IncrementMemory(IndexedZeroPageX), 6),
+        0xf8 => (SetDecimal, 2),
+        0xf9 => (SubtractFromAccumulatorWithBorrow(IndexedAbsoluteY), 4),
+        0xfd => (SubtractFromAccumulatorWithBorrow(IndexedAbsoluteX), 4),
         0xfe => (IncrementMemory(IndexedAbsoluteX), 7),
         _ => unimplemented!("unrecognized opcode {:#04X}", opcode),
+    };
+
+    let disassembly = if !cpu.disassemble || matches!(inst, Initial) {
+        None
+    } else if let Branch(btype) = inst {
+        Some(Disassembly::from_branch_type(&btype, cpu))
+    } else {
+        Some(Disassembly::new(&inst, cpu))
     };
 
     InstructionInfo {
         inst,
         cycles_remaining: cycles,
         address: cpu.pc,
+        disassembly,
     }
 }

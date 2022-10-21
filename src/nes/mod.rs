@@ -15,11 +15,11 @@ pub struct Nes {
 }
 
 impl Nes {
-    pub fn new(cartridge_path: String) -> std::io::Result<Self> {
+    pub fn new(cartridge_path: String, disassemble: bool) -> std::io::Result<Self> {
         let cartridge = Cartridge::new(&cartridge_path)?;
 
         Ok(Nes {
-            cpu: cpu::Cpu::new(cartridge),
+            cpu: cpu::Cpu::new(cartridge, disassemble),
             cycles_spent: 0,
             elapsed_time: Duration::ZERO,
         })

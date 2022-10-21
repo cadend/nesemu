@@ -14,7 +14,7 @@ struct Args {
     rom: String,
 
     #[arg(short, long)]
-    trace: bool,
+    disassemble: bool,
 
     #[arg(long)]
     trace_cpu: bool,
@@ -26,13 +26,15 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let log_level = if args.trace {
+    //TODO: divorce dissassembly and log level flags
+    let log_level = if args.disassemble {
         log::Level::Trace
     } else {
         log::Level::Warn
     };
+
     simple_logger::init_with_level(log_level).unwrap();
 
-    let mut console = Nes::new(args.rom).expect("unable to create console");
+    let mut console = Nes::new(args.rom, args.disassemble).expect("unable to create console");
     console.run(args.trace_cpu, args.breakpoint);
 }

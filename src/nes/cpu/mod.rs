@@ -7,6 +7,10 @@ use log::trace;
 use crate::nes::cartridge::Cartridge;
 use memory::Memory;
 
+const IRQ_VECTOR: u16 = 0xFFFA;
+const RST_VECTOR: u16 = 0xFFFC;
+const NMI_VECTOR: u16 = 0xFFFE;
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(super) enum Register {
     Stack,
@@ -17,15 +21,20 @@ pub(super) enum Register {
 
 impl std::fmt::Debug for Register {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl Register {
+    pub const fn as_str(&self) -> &'static str {
         use Register::*;
 
-        let s = match self {
+        match self {
             Stack => "S",
             Accumulator => "A",
             X => "X",
             Y => "Y",
-        };
-        write!(f, "{}", s)
+        }
     }
 }
 
@@ -38,6 +47,7 @@ pub struct Cpu {
     flags: u8,
     memory: Memory,
     breakpoint: u16,
+    disassemble: bool,
     current_instruction: instruction::InstructionInfo,
 }
 
@@ -67,12 +77,13 @@ mod flags {
     pub const ZERO: u8 = 0b00000010;
     pub const INTERRUPT_DISABLE: u8 = 0b00000100;
     pub const DECIMAL: u8 = 0b00001000;
+    pub const B: u8 = 0b00010000;
     pub const OVERFLOW: u8 = 0b01000000;
     pub const NEGATIVE: u8 = 0b10000000;
 }
 
 impl Cpu {
-    pub fn new(cartridge: Cartridge) -> Self {
+    pub fn new(cartridge: Cartridge, disassemble: bool) -> Self {
         let mut cpu = Cpu {
             a: 0,
             x: 0,
@@ -82,6 +93,7 @@ impl Cpu {
             flags: 0,
             memory: Memory::new(cartridge),
             breakpoint: 0,
+            disassemble,
             current_instruction: instruction::InstructionInfo::default(),
         };
         cpu.reset();
@@ -105,7 +117,7 @@ impl Cpu {
 
     fn reset(&mut self) {
         self.sp = 0xfd;
-        self.pc = self.memory.read_u16(0xfffc);
+        self.pc = self.memory.read_u16(RST_VECTOR);
         self.flags |= flags::INTERRUPT_DISABLE;
         self.set_b_flag(true, false);
     }
@@ -149,26 +161,26 @@ impl Cpu {
         if self.current_instruction.cycles_remaining == 0 {
             let i = instruction::get_instruction(self);
             self.current_instruction = i;
-            self.pc += 1;
         }
 
         self.current_instruction.cycles_remaining -= 1;
         if self.current_instruction.cycles_remaining == 0 {
             self.execute_instruction();
+
+            if breakpoint {
+                println!(
+                    "breaking after instruction at specified breakpoint: {:#06X}",
+                    self.breakpoint
+                );
+                println!("instruction: {:?}", self.current_instruction);
+                println!("{:?}", self);
+                println!("stack: {:#X?}", self.memory.get_stack_slice(self.sp));
+                panic!();
+            }
         }
 
         if trace_cpu {
             trace!("{:#?}", self);
-        }
-        if breakpoint {
-            println!(
-                "breaking after instruction at specified breakpoint: {:#06X}",
-                self.breakpoint
-            );
-            println!("instruction: {:?}", self.current_instruction);
-            println!("{:?}", self);
-            println!("stack: {:#X?}", self.memory.get_stack_slice(self.sp));
-            panic!();
         }
     }
 
@@ -215,115 +227,135 @@ impl Cpu {
         use instruction::BranchType::*;
         use instruction::Instruction::*;
 
-        let instruction_address = self.current_instruction.address;
+        if self.disassemble {
+            self.current_instruction.disasm();
+        }
 
         match self.current_instruction.inst {
             SetInterruptDisable => {
-                trace!("pc={:#06X} SEI", instruction_address);
                 self.flags |= flags::INTERRUPT_DISABLE;
+                self.pc += 1;
+            }
+            SetCarry => {
+                self.flags |= flags::CARRY;
+                self.pc += 1;
+            }
+            SetDecimal => {
+                self.flags |= flags::DECIMAL;
+                self.pc += 1;
+            }
+            ClearInterruptDisable => {
+                self.flags &= !flags::INTERRUPT_DISABLE;
+                self.pc += 1;
             }
             ClearDecimal => {
-                trace!("pc={:#06X} CLD", instruction_address);
                 self.flags &= !flags::DECIMAL;
+                self.pc += 1;
             }
             ClearCarry => {
-                trace!("pc={:#06X} CLC", instruction_address);
                 self.flags &= !flags::CARRY;
+                self.pc += 1;
+            }
+            ClearOverflow => {
+                self.flags &= !flags::OVERFLOW;
+                self.pc += 1;
             }
             LoadAccumulator(am) => {
                 let val = am.get_value_and_adjust_pc(self);
-                trace!("pc={:#06X} LDA {:#04X}", instruction_address, val);
                 self.a = val;
                 self.update_nz_flags(val);
             }
             StoreAccumulator(am) => {
                 let addr = am.get_target_addr_and_adjust_pc(self);
-                trace!("pc={:#06X} STA {:#06X}", instruction_address, addr);
                 self.memory.write_u8(addr, self.a);
             }
             PushAccumulator => {
-                trace!("pc={:#06X} PHA", instruction_address);
                 self.push(self.a);
+                self.pc += 1;
             }
             PopAccumulator => {
-                trace!("pc={:#06X} PLA", instruction_address);
                 let v = self.pop();
                 self.update_nz_flags(v);
                 self.a = v;
+                self.pc += 1;
+            }
+            PushStatus => {
+                self.push(self.flags | flags::B | 0b00100000);
+                self.pc += 1;
+            }
+            PopStatus => {
+                self.flags = self.pop() & 0b11001111;
+
+                self.pc += 1;
             }
             LoadX(am) => {
                 let val = am.get_value_and_adjust_pc(self);
-                trace!("pc={:#06X} LDX {:#04X}", instruction_address, val);
                 self.x = val;
                 self.update_nz_flags(val);
             }
             StoreX(am) => {
                 let addr = am.get_target_addr_and_adjust_pc(self);
-                trace!("pc={:#06X} STX {:#06X}", instruction_address, addr);
                 self.memory.write_u8(addr, self.x);
             }
             RegisterTransfer(src, dst) => {
-                trace!("pc={:#06X} T{:?}{:?}", instruction_address, src, dst);
                 let val = self.get_register(src);
                 self.set_register(dst, val);
 
                 if dst != Register::Stack {
                     self.update_nz_flags(val);
                 }
+                self.pc += 1;
             }
             LoadY(am) => {
                 let val = am.get_value_and_adjust_pc(self);
-                trace!("pc={:#06X} LDY {:#04X}", instruction_address, val);
                 self.y = val;
                 self.update_nz_flags(val);
             }
             StoreY(am) => {
                 let addr = am.get_target_addr_and_adjust_pc(self);
-                trace!("pc={:#06X} STY {:#06X}", instruction_address, addr);
                 self.memory.write_u8(addr, self.y);
             }
             DecrementX => {
-                trace!("pc={:#06X} DEX", instruction_address);
                 self.x = self.x.wrapping_sub(1);
                 self.update_nz_flags(self.x);
+                self.pc += 1;
             }
             DecrementY => {
-                trace!("pc={:#06X} DEY", instruction_address);
                 self.y = self.y.wrapping_sub(1);
                 self.update_nz_flags(self.y);
+                self.pc += 1;
             }
             IncrementX => {
-                trace!("pc={:#06X} INX", instruction_address);
                 self.x = self.x.wrapping_add(1);
                 self.update_nz_flags(self.x);
+                self.pc += 1;
             }
             IncrementY => {
-                trace!("pc={:#06X} INY", instruction_address);
                 self.y = self.y.wrapping_add(1);
                 self.update_nz_flags(self.y);
+                self.pc += 1;
             }
             IncrementMemory(am) => {
                 let addr = am.get_target_addr_and_adjust_pc(self);
-                trace!("pc={:#06X} INC {:#06X}", instruction_address, addr);
                 let new_val = self.memory.read_u8(addr).wrapping_add(1);
                 self.memory.write_u8(addr, new_val);
                 self.update_nz_flags(new_val);
             }
             DecrementMemory(am) => {
                 let addr = am.get_target_addr_and_adjust_pc(self);
-                trace!("pc={:#06X} DEC {:#06X}", instruction_address, addr);
                 let new_val = self.memory.read_u8(addr).wrapping_sub(1);
                 self.memory.write_u8(addr, new_val);
                 self.update_nz_flags(new_val);
             }
             And(am) => {
                 let val = am.get_value_and_adjust_pc(self);
-                trace!("pc={:#06X} AND {:#04X}", instruction_address, val);
                 let r = self.a & val;
                 self.a = r;
                 self.update_nz_flags(r);
             }
             Branch(b) => {
+                // advance past opcode byte
+                self.pc += 1;
                 let val = self.memory.read_u8(self.pc) as i8;
                 self.pc += 1;
 
@@ -335,55 +367,61 @@ impl Cpu {
 
                 match b {
                     ResultZero => {
-                        trace!("pc={:#06X} BEQ {:#06X}", instruction_address, new_pc);
                         if self.flags & flags::ZERO > 0 {
                             self.pc = new_pc;
                         }
                     }
                     ResultNotZero => {
-                        trace!("pc={:#06X} BNE {:#06X}", instruction_address, new_pc);
                         if self.flags & flags::ZERO == 0 {
                             self.pc = new_pc;
                         }
                     }
                     ResultPlus => {
-                        trace!("pc={:#06X} BPL {:#06X}", instruction_address, new_pc);
                         if self.flags & flags::NEGATIVE == 0 {
                             self.pc = new_pc;
                         }
                     }
                     ResultMinus => {
-                        trace!("pc={:#06X} BMI {:#06X}", instruction_address, new_pc);
                         if self.flags & flags::NEGATIVE > 0 {
                             self.pc = new_pc;
                         }
                     }
                     CarryClear => {
-                        trace!("pc={:#06X} BCC {:#06X}", instruction_address, new_pc);
                         if self.flags & flags::CARRY == 0 {
                             self.pc = new_pc;
                         }
                     }
                     CarrySet => {
-                        trace!("pc={:#06X} BCS {:#06X}", instruction_address, new_pc);
                         if self.flags & flags::CARRY > 0 {
+                            self.pc = new_pc;
+                        }
+                    }
+                    OverflowClear => {
+                        if self.flags & flags::OVERFLOW == 0 {
+                            self.pc = new_pc;
+                        }
+                    }
+                    OverflowSet => {
+                        if self.flags & flags::OVERFLOW > 0 {
                             self.pc = new_pc;
                         }
                     }
                 }
             }
             JumpSavingReturn => {
-                // get PC for jump and adjust for bits read
+                // advance past opcode byte
+                self.pc += 1;
+
+                // get PC for jump and adjust for bytes read
                 let new_pc = self.memory.read_u16(self.pc);
                 self.pc += 2;
 
                 // store return PC on stack
-                let return_pc = instruction_address + 2;
+                let return_pc = self.current_instruction.address + 2;
                 self.push((return_pc >> 8) as u8);
                 self.push(return_pc as u8);
 
                 // set new PC
-                trace!("pc={:#06X} JSR {:#06X}", instruction_address, new_pc);
                 self.pc = new_pc;
             }
             ReturnFromSubroutine => {
@@ -391,44 +429,39 @@ impl Cpu {
                 let hi = self.pop();
 
                 let new_pc = ((hi as u16) << 8 | lo as u16) + 1;
-                trace!("pc={:#06X} RTS {:#06X}", instruction_address, new_pc);
                 self.pc = new_pc;
             }
             Jump(am) => {
                 let new_pc = am.get_target_addr_and_adjust_pc(self);
-                trace!("pc={:#06X} JMP {:#06X}", instruction_address, new_pc);
                 self.pc = new_pc;
             }
             CompareWithAccumulator(am) => {
                 let val = am.get_value_and_adjust_pc(self);
-                trace!("pc={:#06X} CMP {:#04X}", instruction_address, val);
                 self.compare(self.a, val);
             }
             CompareWithX(am) => {
                 let val = am.get_value_and_adjust_pc(self);
-                trace!("pc={:#06X} CPX {:#04X}", instruction_address, val);
                 self.compare(self.x, val);
             }
             CompareWithY(am) => {
                 let val = am.get_value_and_adjust_pc(self);
-                trace!("pc={:#06X} CPY {:#04X}", instruction_address, val);
                 self.compare(self.y, val);
             }
             ShiftAccumulatorRight => {
                 let carry = self.a & 1 > 0;
                 let new_val = self.a >> 1;
 
-                trace!("pc={:#06X} LSR A", instruction_address);
                 self.update_shift_flags(carry, new_val);
                 self.a = new_val;
+                self.pc += 1;
             }
             ShiftAccumulatorLeft => {
                 let carry = self.a & 0x80 > 0;
                 let new_val = self.a << 1;
 
-                trace!("pc={:#06X} ASL A", instruction_address);
                 self.update_shift_flags(carry, new_val);
                 self.a = new_val;
+                self.pc += 1;
             }
             ShiftRight(am) => {
                 let addr = am.get_target_addr_and_adjust_pc(self);
@@ -436,7 +469,6 @@ impl Cpu {
                 let carry = v & 1 > 0;
                 let new_val = v >> 1;
 
-                trace!("pc={:#06X} LSR {:#06X}", instruction_address, addr);
                 self.update_shift_flags(carry, new_val);
                 self.memory.write_u8(addr, new_val);
             }
@@ -446,7 +478,6 @@ impl Cpu {
                 let carry = v & 0x80 > 0;
                 let new_val = v << 1;
 
-                trace!("pc={:#06X} ASL {:#06X}", instruction_address, addr);
                 self.update_shift_flags(carry, new_val);
                 self.memory.write_u8(addr, new_val);
             }
@@ -455,7 +486,6 @@ impl Cpu {
                 let c = self.flags & 1;
                 let acc = self.a;
 
-                trace!("pc={:#06X} ADC {:#04X}", instruction_address, val);
                 let new_val = acc.wrapping_add(val).wrapping_add(c);
                 self.a = new_val;
 
@@ -471,7 +501,7 @@ impl Cpu {
                 // the original accumulator and the new accumulator DO NOT share the same sign bit
                 //      then the operation moved the value outside of the signed range and we have to set V
                 //
-                // if the original accumulator and the added value do not share the same sign bit, then their
+                // if the original accumulator and the added value do not share the same sign bit, then they
                 // cannot overflow the signed bounds
                 if (acc ^ val) & 0x80 == 0 && (acc ^ self.a) & 0x80 != 0 {
                     self.flags |= flags::OVERFLOW;
@@ -479,9 +509,42 @@ impl Cpu {
                     self.flags &= !flags::OVERFLOW;
                 }
             }
+            SubtractFromAccumulatorWithBorrow(am) => {
+                let val = am.get_value_and_adjust_pc(self);
+                let c = self.flags & 1;
+                let acc = self.a;
+
+                let new_val = acc.wrapping_sub(val).wrapping_sub(1 - c);
+                self.a = new_val;
+
+                self.update_nz_flags(self.a);
+                if acc as i8 - val as i8 - (1 - c) as i8 >= 0 {
+                    self.flags |= flags::CARRY;
+                } else {
+                    self.flags &= !flags::CARRY;
+                }
+
+                // if the original accumulator and the subtracted value DO NOT share the same sign bit
+                //          AND
+                // the original accumulator and the new accumulator DO NOT share the same sign bit
+                //      then the operation moved the value outside of the signed range and we have to set V
+                //
+                // if the original accumulator and the subtracted value do share the same sign bit, then they
+                // cannot overflow the signed bounds
+                if (acc ^ val) & 0x80 != 0 && (acc ^ self.a) & 0x80 != 0 {
+                    self.flags |= flags::OVERFLOW;
+                } else {
+                    self.flags &= !flags::OVERFLOW;
+                }
+            }
+            Or(am) => {
+                let val = am.get_value_and_adjust_pc(self);
+                let r = self.a | val;
+                self.update_nz_flags(r);
+                self.a = r;
+            }
             ExclusiveOr(am) => {
                 let val = am.get_value_and_adjust_pc(self);
-                trace!("pc={:#06X} EOR {:#04X}", instruction_address, val);
                 let r = self.a ^ val;
                 self.update_nz_flags(r);
                 self.a = r;
@@ -494,13 +557,13 @@ impl Cpu {
                     self.flags &= !flags::CARRY;
                 }
 
-                trace!("pc={:#06X} ROR A", instruction_address);
                 self.a = if curr_c > 0 {
                     (self.a >> 1) | 0x80
                 } else {
                     self.a >> 1
                 };
                 self.update_nz_flags(self.a);
+                self.pc += 1;
             }
             RotateRight(am) => {
                 let addr = am.get_target_addr_and_adjust_pc(self);
@@ -513,11 +576,45 @@ impl Cpu {
                     self.flags &= !flags::CARRY;
                 }
 
-                trace!("pc={:#06X} ROR {:#06X}", instruction_address, addr);
                 let new_val = if curr_c > 0 {
                     (val >> 1) | 0x80
                 } else {
                     val >> 1
+                };
+                self.update_nz_flags(new_val);
+                self.memory.write_u8(addr, new_val);
+            }
+            RotateAccumulatorLeft => {
+                let curr_c = self.flags & 1;
+                if self.a & 0x80 > 0 {
+                    self.flags |= flags::CARRY;
+                } else {
+                    self.flags &= !flags::CARRY;
+                }
+
+                self.a = if curr_c > 0 {
+                    (self.a << 1) | 1
+                } else {
+                    self.a << 1
+                };
+                self.update_nz_flags(self.a);
+                self.pc += 1;
+            }
+            RotateLeft(am) => {
+                let addr = am.get_target_addr_and_adjust_pc(self);
+                let val = self.memory.read_u8(addr);
+
+                let curr_c = self.flags & 1;
+                if val & 0x80 > 0 {
+                    self.flags |= flags::CARRY;
+                } else {
+                    self.flags &= !flags::CARRY;
+                }
+
+                let new_val = if curr_c > 0 {
+                    (val << 1) | 1
+                } else {
+                    val << 1
                 };
                 self.update_nz_flags(new_val);
                 self.memory.write_u8(addr, new_val);
@@ -543,7 +640,34 @@ impl Cpu {
                     self.flags &= !flags::ZERO;
                 }
             }
-            NoOp => {}
+            ForceBreak => {
+                self.flags |= flags::INTERRUPT_DISABLE;
+
+                // get PC for jump from NMI vector
+                let new_pc = self.memory.read_u16(NMI_VECTOR);
+
+                // store return PC on stack
+                let return_pc = self.current_instruction.address + 2;
+                self.push((return_pc >> 8) as u8);
+                self.push(return_pc as u8);
+
+                // store status register on stack
+                self.push(self.sp | flags::B);
+
+                self.pc = new_pc;
+            }
+            ReturnFromInterrupt => {
+                self.flags = self.pop() & 0b11001111;
+
+                let lo = self.pop();
+                let hi = self.pop();
+
+                let new_pc = ((hi as u16) << 8 | lo as u16);
+                self.pc = new_pc;
+            }
+            NoOp => {
+                self.pc += 1;
+            }
             Initial => unreachable!(),
         }
     }
